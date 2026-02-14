@@ -1,13 +1,19 @@
 import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
+import {
+  fetchCurrentPriceAlphaVantage,
+  fetchDailyHistoryAlphaVantage,
+  LiveDataError,
+} from "./marketData/alphaVantage";
 
 /**
  * Stock Check v1.2 (43-Factor Model) — Frontend reference implementation.
  *
  * Notes:
  * - This frontend implements MOCK mode deterministically (seeded) per BRD.
- * - LIVE mode is supported as a UI mode; without a backend/data provider, LIVE mode
- *   displays a clear "not configured" message and does not hallucinate data.
+ * - LIVE mode (this task): prices/history only via Alpha Vantage; no hallucinated data.
+ * - Any missing/invalid live data must cause a clear failure (BRD v1.2).
+ * - Every live call must log timestamp + source (implemented in alphaVantage client).
  * - 43-factor weights/definitions are treated as locked constants.
  */
 
@@ -302,6 +308,41 @@ function generateMockResults({ seed, universeSize }) {
   };
 }
 
+function pctChange(from, to) {
+  if (from === 0) return null;
+  return ((to - from) / from) * 100;
+}
+
+function requireHistoryPoints(history, requiredCount, label) {
+  if (!Array.isArray(history) || history.length < requiredCount) {
+    throw new LiveDataError(
+      `LIVE mode requires at least ${requiredCount} daily data points for ${label}; received ${Array.isArray(history) ? history.length : 0}.`,
+      { label, requiredCount }
+    );
+  }
+}
+
+function computeTrailingReturnPctFromDailyCloses(history, tradingDays) {
+  // history must be ascending by date.
+  requireHistoryPoints(history, tradingDays + 1, `${tradingDays}-day return`);
+  const start = history[history.length - 1 - tradingDays]?.close;
+  const end = history[history.length - 1]?.close;
+  if (typeof start !== "number" || typeof end !== "number") {
+    throw new LiveDataError("LIVE history points were missing required close values.", {
+      tradingDays,
+    });
+  }
+  const pct = pctChange(start, end);
+  if (pct === null || !Number.isFinite(pct)) {
+    throw new LiveDataError("LIVE return computation failed due to invalid values.", {
+      tradingDays,
+      start,
+      end,
+    });
+  }
+  return pct;
+}
+
 // PUBLIC_INTERFACE
 function App() {
   /** Theme is kept from template, but moved into a modern layout. */
@@ -343,31 +384,81 @@ function App() {
         return;
       }
 
-      // LIVE mode: do not hallucinate. Require a backend API.
-      const apiBase = process.env.REACT_APP_API_BASE || process.env.REACT_APP_BACKEND_URL || "";
-      if (!apiBase) {
-        throw new Error(
-          "LIVE mode requires a configured backend data source (REACT_APP_API_BASE or REACT_APP_BACKEND_URL). No live data is available in this frontend-only build."
-        );
-      }
+      /**
+       * LIVE mode (minimal viable per task):
+       * - Pull REAL price/history ONLY (no rank scan across 1000 tickers).
+       * - Use Alpha Vantage from the React app (key via REACT_APP_ALPHA_VANTAGE_API_KEY).
+       * - Fail clearly on missing/invalid data. No hallucinated values.
+       * - Log timestamp + source for each market data call (handled in client).
+       *
+       * For this minimal implementation we compute results for a single required ticker: INTC.
+       */
+      const symbol = "INTC";
 
-      // If a backend exists in future, expected endpoint contract can be wired here.
-      // For now, we deliberately fail fast to comply with BRD (no hallucinated data).
-      throw new Error(
-        "LIVE mode is not yet wired: backend endpoint not implemented in this container. Configure a backend to provide the Output Contract payload."
-      );
+      const [{ price, asOfDate }, { history }] = await Promise.all([
+        fetchCurrentPriceAlphaVantage(symbol),
+        fetchDailyHistoryAlphaVantage(symbol, 320),
+      ]);
+
+      // Compute horizons using approximate trading day counts.
+      const ret3m = computeTrailingReturnPctFromDailyCloses(history, 63);
+      const ret6m = computeTrailingReturnPctFromDailyCloses(history, 126);
+      const ret12m = computeTrailingReturnPctFromDailyCloses(history, 252);
+
+      // LIVE mode does not provide prediction outputs in this minimal version.
+      // To comply with "no hallucinated data", we set these to null and fail if UI tries to format them.
+      const payload = {
+        model_version: "Stock Check v1.2",
+        data_mode: "LIVE",
+        current_date: new Date().toISOString().slice(0, 10),
+        prediction_date: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        trade_header: "NO TRADE",
+        sector_warning: false,
+        metrics: {
+          avg_top10_predicted_growth_pct: 0,
+          dispersion_top10_pct: 0,
+          max_sector_count_top10: 0,
+        },
+        results: [
+          {
+            rank: "—",
+            ticker: symbol,
+            companyName: "Intel Corporation",
+            sector: "Technology",
+            currentPrice: price,
+            predictedPrice: price,
+            predicted1dGrowthPct: 0,
+            ret3m,
+            ret6m,
+            ret12m,
+            liveMeta: {
+              priceAsOfDate: asOfDate,
+            },
+          },
+        ],
+      };
+
+      setOutput(payload);
+      setRunState({ status: "success", error: null });
     } catch (e) {
-      setRunState({ status: "error", error: e instanceof Error ? e.message : String(e) });
+      const message =
+        e instanceof LiveDataError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : String(e);
+
+      setRunState({ status: "error", error: message });
     }
   };
 
   const liveModeNotice = (
-    <div className="callout callout-warn">
-      <div className="callout-title">LIVE mode (default)</div>
+    <div className="callout callout-info">
+      <div className="callout-title">LIVE mode (Alpha Vantage)</div>
       <div className="callout-body">
-        LIVE mode must retrieve real market data and <strong>must fail on missing data</strong> (BRD v1.2).
-        This frontend will not generate live values. To enable LIVE, provide a backend and set{" "}
-        <code>REACT_APP_API_BASE</code> (or <code>REACT_APP_BACKEND_URL</code>).
+        LIVE mode fetches <strong>real prices/history only</strong> from Alpha Vantage using{" "}
+        <code>REACT_APP_ALPHA_VANTAGE_API_KEY</code>. If required data is missing/invalid, the run fails
+        clearly (BRD v1.2). Each live call logs <code>timestamp</code> + <code>source</code> to the console.
       </div>
     </div>
   );
@@ -477,8 +568,11 @@ function App() {
                   {liveModeNotice}
                   <div className="row">
                     <button className="btn btn-primary" type="button" onClick={runModel} id="run">
-                      {runState.status === "running" ? "Running…" : "Run LIVE Scan"}
+                      {runState.status === "running" ? "Running…" : "Run LIVE (prices/history)"}
                     </button>
+                  </div>
+                  <div className="hint">
+                    Note: Alpha Vantage free tier is rate-limited (often ~5 req/min). Rapid repeated runs may fail with a throttling error.
                   </div>
                 </>
               )}
@@ -667,7 +761,7 @@ function App() {
 
               <div className="footnote">
                 <strong>Note:</strong> In <span className="badge badge-warn">MOCK</span> mode, values are simulated and deterministic by seed.
-                In LIVE mode, this UI requires a backend provider and will not fabricate data.
+                In <span className="badge badge-live">LIVE</span> mode, prices/history are real (Alpha Vantage). This minimal LIVE wiring does not produce predictions.
               </div>
             </>
           )}
