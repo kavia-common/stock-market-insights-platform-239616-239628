@@ -4,6 +4,7 @@ import {
   fetchCurrentPriceAlphaVantage,
   fetchDailyHistoryAlphaVantage,
   LiveDataError,
+  hasAlphaVantageApiKey,
 } from "./marketData/alphaVantage";
 
 /**
@@ -348,7 +349,8 @@ function App() {
   /** Theme is kept from template, but moved into a modern layout. */
   const [theme, setTheme] = useState("light");
 
-  const [dataMode, setDataMode] = useState("LIVE"); // Default LIVE per BRD.
+  const liveAvailable = useMemo(() => hasAlphaVantageApiKey(), []);
+  const [dataMode, setDataMode] = useState(() => (liveAvailable ? "LIVE" : "MOCK"));
   const [mockSeed, setMockSeed] = useState(12345);
   const [mockUniverseSize, setMockUniverseSize] = useState(2000);
 
@@ -358,6 +360,13 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    // If LIVE isn't available (no key), ensure the app stays usable in preview by falling back to MOCK.
+    if (!liveAvailable && dataMode === "LIVE") {
+      setDataMode("MOCK");
+    }
+  }, [liveAvailable, dataMode]);
 
   // PUBLIC_INTERFACE
   const toggleTheme = () => setTheme((prev) => (prev === "light" ? "dark" : "light"));
@@ -382,6 +391,13 @@ function App() {
         setOutput(payload);
         setRunState({ status: "success", error: null });
         return;
+      }
+
+      if (!liveAvailable) {
+        throw new LiveDataError(
+          "LIVE mode is unavailable because REACT_APP_ALPHA_VANTAGE_API_KEY is not set. Switch to MOCK to preview the UI.",
+          { envVar: "REACT_APP_ALPHA_VANTAGE_API_KEY" }
+        );
       }
 
       /**
@@ -453,12 +469,24 @@ function App() {
   };
 
   const liveModeNotice = (
-    <div className="callout callout-info">
+    <div className={`callout ${liveAvailable ? "callout-info" : "callout-warn"}`}>
       <div className="callout-title">LIVE mode (Alpha Vantage)</div>
       <div className="callout-body">
         LIVE mode fetches <strong>real prices/history only</strong> from Alpha Vantage using{" "}
-        <code>REACT_APP_ALPHA_VANTAGE_API_KEY</code>. If required data is missing/invalid, the run fails
-        clearly (BRD v1.2). Each live call logs <code>timestamp</code> + <code>source</code> to the console.
+        <code>REACT_APP_ALPHA_VANTAGE_API_KEY</code>.
+        {!liveAvailable ? (
+          <>
+            {" "}
+            <strong>LIVE is currently disabled</strong> because the key is not set. You can still use{" "}
+            <strong>MOCK</strong> mode to preview the UI.
+          </>
+        ) : (
+          <>
+            {" "}
+            If required data is missing/invalid, the run fails clearly (BRD v1.2). Each live call logs{" "}
+            <code>timestamp</code> + <code>source</code> to the console.
+          </>
+        )}
       </div>
     </div>
   );
@@ -507,8 +535,10 @@ function App() {
                   value={dataMode}
                   onChange={(e) => setDataMode(e.target.value)}
                 >
-                  <option value="LIVE">LIVE (default)</option>
-                  <option value="MOCK">MOCK (deterministic)</option>
+                  <option value="LIVE" disabled={!liveAvailable}>
+                    LIVE {liveAvailable ? "(Alpha Vantage)" : "(disabled — missing API key)"}
+                  </option>
+                  <option value="MOCK">MOCK (deterministic — recommended for preview)</option>
                 </select>
               </div>
 
@@ -567,12 +597,36 @@ function App() {
                 <>
                   {liveModeNotice}
                   <div className="row">
-                    <button className="btn btn-primary" type="button" onClick={runModel} id="run">
-                      {runState.status === "running" ? "Running…" : "Run LIVE (prices/history)"}
+                    <button
+                      className="btn btn-primary"
+                      type="button"
+                      onClick={runModel}
+                      id="run"
+                      disabled={!liveAvailable || runState.status === "running"}
+                      aria-disabled={!liveAvailable || runState.status === "running"}
+                      title={
+                        !liveAvailable
+                          ? "Set REACT_APP_ALPHA_VANTAGE_API_KEY to enable LIVE mode."
+                          : undefined
+                      }
+                    >
+                      {runState.status === "running"
+                        ? "Running…"
+                        : liveAvailable
+                          ? "Run LIVE (prices/history)"
+                          : "LIVE disabled (missing API key)"}
                     </button>
                   </div>
                   <div className="hint">
-                    Note: Alpha Vantage free tier is rate-limited (often ~5 req/min). Rapid repeated runs may fail with a throttling error.
+                    {!liveAvailable ? (
+                      <>
+                        To enable LIVE, set <code>REACT_APP_ALPHA_VANTAGE_API_KEY</code> in your environment and reload.
+                      </>
+                    ) : (
+                      <>
+                        Note: Alpha Vantage free tier is rate-limited (often ~5 req/min). Rapid repeated runs may fail with a throttling error.
+                      </>
+                    )}
                   </div>
                 </>
               )}

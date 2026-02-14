@@ -20,8 +20,21 @@ function isFiniteNumber(n) {
   return typeof n === "number" && Number.isFinite(n);
 }
 
+function getEnv(name) {
+  return process.env[name];
+}
+
+// PUBLIC_INTERFACE
+export function hasAlphaVantageApiKey() {
+  /**
+   * Indicates whether LIVE mode can be used (i.e., the Alpha Vantage API key is configured).
+   * This must be safe to call in preview environments where the env var is intentionally missing.
+   */
+  return Boolean(getEnv("REACT_APP_ALPHA_VANTAGE_API_KEY"));
+}
+
 function requireEnv(name) {
-  const value = process.env[name];
+  const value = getEnv(name);
   if (!value) {
     throw new LiveDataError(`LIVE mode requires ${name} to be set.`, { envVar: name });
   }
